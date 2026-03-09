@@ -26,7 +26,6 @@ Point d'entree rapide depuis la racine :
 - `terraform/pnetlab/` - stack Terraform PNETLab
 - `scripts/` - scripts d'orchestration, de preparation et de recuperation
 - `DOCUMENTATION/` - documentation structuree du projet
-- `archives/` - anciens documents et supports de reference
 - `logs/` - journaux d'execution
 - `tmp/` - artefacts temporaires de debug
 

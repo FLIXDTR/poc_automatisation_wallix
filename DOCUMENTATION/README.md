@@ -139,7 +139,6 @@ Le depot a ete nettoye pour separer les zones de travail.
 Organisation retenue :
 
 - `DOCUMENTATION/` : documentation principale ;
-- `archives/` : anciens documents et supports de reference ;
 - `logs/` : journaux d'execution ;
 - `tmp/` : artefacts temporaires et captures de debug.
 
