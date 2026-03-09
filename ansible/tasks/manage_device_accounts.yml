@@ -1,0 +1,15 @@
+---
+- name: Skip accounts when none configured for {{ wallix_device_name }} domain {{ wallix_domain_name }}
+  ansible.builtin.debug:
+    msg: "No accounts configured for device {{ wallix_device_name }} domain {{ wallix_domain_name }}."
+  changed_when: false
+  when: wallix_domain_accounts is not defined or (wallix_domain_accounts | length == 0)
+
+- name: Ensure accounts exist for {{ wallix_device_name }} domain {{ wallix_domain_name }}
+  ansible.builtin.include_tasks: manage_device_account.yml
+  loop: "{{ wallix_domain_accounts | default([]) }}"
+  loop_control:
+    loop_var: wallix_account
+    label: "{{ wallix_account.account_name | default('missing_account_name') }}"
+  when: wallix_domain_accounts is defined and (wallix_domain_accounts | length > 0)
+

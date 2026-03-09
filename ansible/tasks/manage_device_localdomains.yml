@@ -1,0 +1,15 @@
+---
+- name: Skip local domains when none configured for {{ wallix_device_name }}
+  ansible.builtin.debug:
+    msg: "No local domains configured for device {{ wallix_device_name }}."
+  changed_when: false
+  when: wallix_device_localdomains is not defined or (wallix_device_localdomains | length == 0)
+
+- name: Ensure local domains exist for {{ wallix_device_name }}
+  ansible.builtin.include_tasks: manage_device_localdomain.yml
+  loop: "{{ wallix_device_localdomains | default([]) }}"
+  loop_control:
+    loop_var: wallix_domain
+    label: "{{ wallix_domain.domain_name | default('missing_domain_name') }}"
+  when: wallix_device_localdomains is defined and (wallix_device_localdomains | length > 0)
+

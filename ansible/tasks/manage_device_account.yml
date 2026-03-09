@@ -1,0 +1,82 @@
+---
+- name: Validate account definition
+  ansible.builtin.assert:
+    that:
+      - wallix_account.account_name is defined
+      - (wallix_account.account_name | string | length) > 0
+      - wallix_account.account_login is defined
+      - (wallix_account.account_login | string | length) > 0
+      - wallix_account.checkout_policy is defined
+      - (wallix_account.checkout_policy | string | length) > 0
+    fail_msg: >-
+      Account requires account_name + account_login + checkout_policy.
+      Got: {{ wallix_account | default({}) }}
+
+- name: Fetch existing account {{ wallix_account.account_name }} on {{ wallix_device_name }} (domain {{ wallix_domain_name }})
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains/{{ wallix_domain_name }}/accounts/{{ wallix_account.account_name }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  register: wallix_account_get
+  changed_when: false
+
+- name: Create account {{ wallix_account.account_name }} when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains/{{ wallix_domain_name }}/accounts"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      account_name: "{{ wallix_account.account_name }}"
+      account_login: "{{ wallix_account.account_login }}"
+      checkout_policy: "{{ wallix_account.checkout_policy }}"
+      description: "{{ wallix_account.description | default('') }}"
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: wallix_account_get.status | int == 404
+
+- name: Update account {{ wallix_account.account_name }} when drift detected
+  vars:
+    existing: "{{ wallix_account_get.json | default({}) }}"
+    desired_login: "{{ wallix_account.account_login }}"
+    desired_checkout: "{{ wallix_account.checkout_policy }}"
+    desired_description: "{{ wallix_account.description | default('') }}"
+    drift: >-
+      {{
+        (existing.account_login | default('') != desired_login)
+        or (existing.checkout_policy | default('') != desired_checkout)
+        or (existing.description | default('') != desired_description)
+      }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains/{{ wallix_domain_name }}/accounts/{{ wallix_account.account_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      account_login: "{{ desired_login }}"
+      checkout_policy: "{{ desired_checkout }}"
+      description: "{{ desired_description }}"
+    status_code: [200, 204]
+  changed_when: drift | bool
+  when:
+    - wallix_account_get.status | int == 200
+    - drift | bool
+
+- name: Ensure credentials exist for account {{ wallix_account.account_name }}
+  ansible.builtin.include_tasks: manage_device_credentials.yml
+  vars:
+    wallix_account_name: "{{ wallix_account.account_name }}"
+    wallix_account_credentials: "{{ wallix_account.credentials | default([]) }}"

@@ -1,0 +1,28 @@
+---
+- name: Skip authorizations when not configured
+  ansible.builtin.debug:
+    msg: "No authorizations configured (set wallix_authorizations in assets file)."
+  changed_when: false
+  when: wallix_authorizations is not defined or (wallix_authorizations | length == 0)
+
+- name: Fetch existing authorizations (for idempotence)
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/authorizations?limit=1000"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200]
+  register: wallix_authorizations_list
+  changed_when: false
+  when: wallix_authorizations is defined and (wallix_authorizations | length > 0)
+
+- name: Ensure authorizations exist and match desired privileges
+  ansible.builtin.include_tasks: manage_authorization.yml
+  loop: "{{ wallix_authorizations | default([]) }}"
+  loop_control:
+    loop_var: wallix_authorization
+    label: "{{ wallix_authorization.authorization_name | default('missing_authorization_name') }}"
+  when: wallix_authorizations is defined and (wallix_authorizations | length > 0)

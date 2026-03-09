@@ -1,0 +1,25 @@
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+.secrets.env
+secrets_local.env
+secrets_pnetlab.env
+
+ansible/inventory/generated/hosts.yml
+
+__pycache__/
+*.pyc
+.venv/
+*.iso
+
+# Terraform local artifacts
+terraform/pnetlab/*generated.unl
+
+# Local debugging artifacts
+tmp_*
+tmp/*
+!tmp/README.md
+logs/*
+!logs/README.md

@@ -1,0 +1,117 @@
+---
+- name: Validate authorization definition
+  ansible.builtin.assert:
+    that:
+      - wallix_authorization.authorization_name is defined
+      - (wallix_authorization.authorization_name | string | length) > 0
+      - wallix_authorization.user_group is defined
+      - (wallix_authorization.user_group | string | length) > 0
+      - wallix_authorization.target_group is defined
+      - (wallix_authorization.target_group | string | length) > 0
+    fail_msg: >-
+      Authorization requires authorization_name + user_group + target_group.
+      Got: {{ wallix_authorization | default({}) }}
+
+- name: Compute authorization desired state
+  vars:
+    desired_description: "{{ wallix_authorization.description | default('') }}"
+    desired_authorize_sessions: "{{ wallix_authorization.authorize_sessions | default(false) | bool }}"
+    desired_authorize_password_retrieval: "{{ wallix_authorization.authorize_password_retrieval | default(false) | bool }}"
+    desired_approval_required: "{{ wallix_authorization.approval_required | default(false) | bool }}"
+    desired_is_recorded: "{{ wallix_authorization.is_recorded | default(false) | bool }}"
+    desired_subprotocols: "{{ (wallix_authorization.subprotocols | default([])) | list }}"
+    existing_item: >-
+      {{
+        (wallix_authorizations_list.json | default([]))
+        | selectattr('authorization_name', 'equalto', wallix_authorization.authorization_name | default(''))
+        | list
+        | first
+        | default({})
+      }}
+    existing_id: >-
+      {{
+        (existing_item.id | default('') | string)
+        if ((existing_item.id | default('') | string | length) > 0)
+        else (existing_item.url | default('') | regex_replace('^.*/api/authorizations/', ''))
+      }}
+    existing_subprotocols: "{{ (existing_item.subprotocols | default([])) | list }}"
+    drift: >-
+      {{
+        (existing_item | length == 0)
+        or (existing_item.user_group | default('') != (wallix_authorization.user_group | default('')))
+        or (existing_item.target_group | default('') != (wallix_authorization.target_group | default('')))
+        or ((existing_item.description | default('')) != desired_description)
+        or ((existing_subprotocols | sort) != (desired_subprotocols | sort))
+        or ((existing_item.authorize_sessions | default(false) | bool) != desired_authorize_sessions)
+        or ((existing_item.authorize_password_retrieval | default(false) | bool) != desired_authorize_password_retrieval)
+        or ((existing_item.approval_required | default(false) | bool) != desired_approval_required)
+        or ((existing_item.is_recorded | default(false) | bool) != desired_is_recorded)
+      }}
+  ansible.builtin.set_fact:
+    wallix_authorization_existing: "{{ existing_item }}"
+    wallix_authorization_existing_id: "{{ existing_id }}"
+    wallix_authorization_desired_description: "{{ desired_description }}"
+    wallix_authorization_desired_subprotocols: "{{ desired_subprotocols }}"
+    wallix_authorization_desired_authorize_sessions: "{{ desired_authorize_sessions }}"
+    wallix_authorization_desired_authorize_password_retrieval: "{{ desired_authorize_password_retrieval }}"
+    wallix_authorization_desired_approval_required: "{{ desired_approval_required }}"
+    wallix_authorization_desired_is_recorded: "{{ desired_is_recorded }}"
+    wallix_authorization_drift: "{{ drift }}"
+  changed_when: false
+
+- name: Validate subprotocols are provided when sessions are authorized
+  ansible.builtin.assert:
+    that:
+      - (not wallix_authorization_desired_authorize_sessions) or (wallix_authorization_desired_subprotocols | length > 0)
+    fail_msg: >-
+      authorize_sessions=true requires non-empty subprotocols (e.g. ['RDP']).
+      Authorization: {{ wallix_authorization.authorization_name }}
+
+- name: Create authorization when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/authorizations"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      authorization_name: "{{ wallix_authorization.authorization_name }}"
+      description: "{{ wallix_authorization_desired_description }}"
+      user_group: "{{ wallix_authorization.user_group }}"
+      target_group: "{{ wallix_authorization.target_group }}"
+      subprotocols: "{{ wallix_authorization_desired_subprotocols }}"
+      authorize_sessions: "{{ wallix_authorization_desired_authorize_sessions }}"
+      authorize_password_retrieval: "{{ wallix_authorization_desired_authorize_password_retrieval }}"
+      approval_required: "{{ wallix_authorization_desired_approval_required }}"
+      is_recorded: "{{ wallix_authorization_desired_is_recorded }}"
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: wallix_authorization_existing | length == 0
+
+- name: Update authorization when drift detected
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/authorizations/{{ wallix_authorization_existing_id }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      authorization_name: "{{ wallix_authorization.authorization_name }}"
+      description: "{{ wallix_authorization_desired_description }}"
+      subprotocols: "{{ wallix_authorization_desired_subprotocols }}"
+      authorize_sessions: "{{ wallix_authorization_desired_authorize_sessions }}"
+      authorize_password_retrieval: "{{ wallix_authorization_desired_authorize_password_retrieval }}"
+      approval_required: "{{ wallix_authorization_desired_approval_required }}"
+      is_recorded: "{{ wallix_authorization_desired_is_recorded }}"
+    status_code: [200, 204]
+  changed_when: true
+  when:
+    - wallix_authorization_existing | length > 0
+    - wallix_authorization_existing_id | length > 0
+    - wallix_authorization_drift | bool

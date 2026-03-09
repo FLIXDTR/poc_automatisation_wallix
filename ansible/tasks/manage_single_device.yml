@@ -1,0 +1,90 @@
+---
+- name: Validate device definition
+  ansible.builtin.assert:
+    that:
+      - wallix_device.device_name is defined
+      - (wallix_device.device_name | string | length) > 0
+      - wallix_device.host is defined
+      - (wallix_device.host | string | length) > 0
+    fail_msg: "Device requires device_name + host. Got: {{ wallix_device | default({}) }}"
+
+- name: Fetch existing device
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device.device_name }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  register: wallix_device_get
+  changed_when: false
+
+- name: Create device when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      device_name: "{{ wallix_device.device_name }}"
+      host: "{{ wallix_device.host }}"
+      description: "{{ wallix_device.description | default('') }}"
+      alias: "{{ wallix_device.alias | default('') }}"
+      tags: "{{ wallix_device.tags | default([]) }}"
+    status_code: [200, 201, 204]
+  register: wallix_device_create
+  changed_when: true
+  when: wallix_device_get.status | int == 404
+
+- name: Update device when drift detected
+  vars:
+    existing: "{{ wallix_device_get.json | default({}) }}"
+    desired_description: "{{ wallix_device.description | default('') }}"
+    desired_alias: "{{ wallix_device.alias | default('') }}"
+    desired_tags: "{{ wallix_device.tags | default([]) }}"
+    drift: >-
+      {{
+        (existing.host | default('') != (wallix_device.host | string))
+        or (existing.description | default('') != desired_description)
+        or (existing.alias | default('') != desired_alias)
+        or ((existing.tags | default([])) != desired_tags)
+      }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device.device_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      host: "{{ wallix_device.host }}"
+      description: "{{ desired_description }}"
+      alias: "{{ desired_alias }}"
+      tags: "{{ desired_tags }}"
+    status_code: [200, 204]
+  register: wallix_device_update
+  changed_when: drift | bool
+  when:
+    - wallix_device_get.status | int == 200
+    - drift | bool
+
+- name: Ensure device services exist
+  ansible.builtin.include_tasks: manage_device_services.yml
+  vars:
+    wallix_device_name: "{{ wallix_device.device_name }}"
+    wallix_device_services: "{{ wallix_device.services | default([]) }}"
+
+- name: Ensure device local domains exist
+  ansible.builtin.include_tasks: manage_device_localdomains.yml
+  vars:
+    wallix_device_name: "{{ wallix_device.device_name }}"
+    wallix_device_localdomains: "{{ wallix_device.local_domains | default([]) }}"
+

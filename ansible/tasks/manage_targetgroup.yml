@@ -1,0 +1,301 @@
+---
+- name: Compute desired target group inputs
+  ansible.builtin.set_fact:
+    desired_description: "{{ wallix_targetgroup.description | default('') }}"
+    desired_session_accounts: "{{ wallix_targetgroup.session_accounts | default([]) }}"
+    desired_session_interactive_logins: "{{ wallix_targetgroup.session_interactive_logins | default([]) }}"
+    desired_password_accounts: "{{ wallix_targetgroup.password_retrieval_accounts | default([]) }}"
+  changed_when: false
+
+- name: Validate target group definition
+  ansible.builtin.assert:
+    that:
+      - wallix_targetgroup.group_name is defined
+      - (wallix_targetgroup.group_name | string | length) > 0
+    fail_msg: "Target group requires group_name. Got: {{ wallix_targetgroup | default({}) }}"
+
+- name: Initialize target group payload buffers
+  ansible.builtin.set_fact:
+    wallix_tg_session_accounts_payload: []
+    wallix_tg_interactive_logins_payload: []
+    wallix_tg_password_accounts_payload: []
+  changed_when: false
+
+- name: Validate target group session accounts (when configured)
+  ansible.builtin.assert:
+    that:
+      - item.account is defined
+      - item.domain is defined
+      - item.domain_type is defined
+      - item.device is defined
+      - item.service is defined
+    fail_msg: "Session account requires account/domain/domain_type/device/service. Got: {{ item | default({}) }}"
+  loop: "{{ desired_session_accounts }}"
+  loop_control:
+    label: "{{ item.device | default('?') }}:{{ item.service | default('?') }} {{ item.domain | default('?') }}\\{{ item.account | default('?') }}"
+  when: desired_session_accounts | length > 0
+
+- name: Validate target group password retrieval accounts (when configured)
+  ansible.builtin.assert:
+    that:
+      - item.account is defined
+      - item.domain is defined
+      - item.domain_type is defined
+      - item.device is defined
+    fail_msg: "Password retrieval account requires account/domain/domain_type/device. Got: {{ item | default({}) }}"
+  loop: "{{ desired_password_accounts }}"
+  loop_control:
+    label: "{{ item.device | default('?') }} {{ item.domain | default('?') }}\\{{ item.account | default('?') }}"
+  when: desired_password_accounts | length > 0
+
+- name: Validate target group interactive logins (when configured)
+  ansible.builtin.assert:
+    that:
+      - item.device is defined
+      - (item.device | string | length) > 0
+      - item.service is defined
+      - (item.service | string | length) > 0
+    fail_msg: "Interactive login requires device/service. Got: {{ item | default({}) }}"
+  loop: "{{ desired_session_interactive_logins }}"
+  loop_control:
+    label: "{{ item.device | default('?') }}:{{ item.service | default('?') }}"
+  when: desired_session_interactive_logins | length > 0
+
+- name: Build target group session accounts payload
+  ansible.builtin.set_fact:
+    wallix_tg_session_accounts_payload: >-
+      {{
+        (wallix_tg_session_accounts_payload | default([]))
+        + [
+          {
+            'account': item.account,
+            'domain': item.domain,
+            'domain_type': item.domain_type,
+            'device': item.device,
+            'service': item.service,
+            'application': (item.application | default(none))
+          }
+        ]
+      }}
+  loop: "{{ desired_session_accounts }}"
+  changed_when: false
+
+- name: Build target group interactive logins payload
+  ansible.builtin.set_fact:
+    wallix_tg_interactive_logins_payload: >-
+      {{
+        (wallix_tg_interactive_logins_payload | default([]))
+        + [
+          {
+            'device': item.device,
+            'service': item.service,
+            'application': (item.application | default(none))
+          }
+        ]
+      }}
+  loop: "{{ desired_session_interactive_logins }}"
+  changed_when: false
+
+- name: Build target group password retrieval accounts payload
+  ansible.builtin.set_fact:
+    wallix_tg_password_accounts_payload: >-
+      {{
+        (wallix_tg_password_accounts_payload | default([]))
+        + [
+          (
+            {
+              'account': item.account,
+              'domain': item.domain,
+              'domain_type': item.domain_type,
+              'device': item.device
+            }
+            | combine({'service': item.service} if (item.service is defined and (item.service | string | length) > 0) else {})
+            | combine({'application': (item.application | default(none))} if (item.application is defined) else {})
+          )
+        ]
+      }}
+  loop: "{{ desired_password_accounts }}"
+  changed_when: false
+
+- name: Fetch existing target group
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/targetgroups/{{ wallix_targetgroup.group_name }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  register: wallix_targetgroup_get
+  changed_when: false
+
+- name: Create target group when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/targetgroups"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body: >-
+      {{
+        {'group_name': wallix_targetgroup.group_name}
+        | combine({'description': desired_description} if (desired_description | length > 0) else {})
+      }}
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: wallix_targetgroup_get.status | int == 404
+
+- name: Initialize target group drift detection state
+  ansible.builtin.set_fact:
+    wallix_tg_existing_session_keys: []
+    wallix_tg_existing_password_keys: []
+    wallix_tg_existing_interactive_keys: []
+    wallix_tg_desired_session_keys: []
+    wallix_tg_desired_password_keys: []
+    wallix_tg_desired_interactive_keys: []
+  changed_when: false
+
+- name: Build desired session key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          item.domain_type | default(''),
+          item.domain | default(''),
+          item.account | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_desired_session_keys: "{{ wallix_tg_desired_session_keys + [key] }}"
+  loop: "{{ wallix_tg_session_accounts_payload | default([]) }}"
+  changed_when: false
+
+- name: Build desired password retrieval key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          item.domain_type | default(''),
+          item.domain | default(''),
+          item.account | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_desired_password_keys: "{{ wallix_tg_desired_password_keys + [key] }}"
+  loop: "{{ wallix_tg_password_accounts_payload | default([]) }}"
+  changed_when: false
+
+- name: Build desired interactive login key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_desired_interactive_keys: "{{ wallix_tg_desired_interactive_keys + [key] }}"
+  loop: "{{ wallix_tg_interactive_logins_payload | default([]) }}"
+  changed_when: false
+
+- name: Build existing session key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          item.domain_type | default(''),
+          item.domain | default(''),
+          item.account | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_existing_session_keys: "{{ wallix_tg_existing_session_keys + [key] }}"
+  loop: "{{ (wallix_targetgroup_get.json.session.accounts | default([])) if (wallix_targetgroup_get.status | int == 200) else [] }}"
+  changed_when: false
+
+- name: Build existing interactive login key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_existing_interactive_keys: "{{ wallix_tg_existing_interactive_keys + [key] }}"
+  loop: "{{ (wallix_targetgroup_get.json.session.interactive_logins | default([])) if (wallix_targetgroup_get.status | int == 200) else [] }}"
+  changed_when: false
+
+- name: Build existing password retrieval key list (order-independent)
+  vars:
+    key: >-
+      {{
+        [
+          item.device | default(''),
+          item.service | default(''),
+          item.domain_type | default(''),
+          item.domain | default(''),
+          item.account | default(''),
+          (item.application | default('') | string)
+        ] | join('|')
+      }}
+  ansible.builtin.set_fact:
+    wallix_tg_existing_password_keys: "{{ wallix_tg_existing_password_keys + [key] }}"
+  loop: "{{ (wallix_targetgroup_get.json.password_retrieval.accounts | default([])) if (wallix_targetgroup_get.status | int == 200) else [] }}"
+  changed_when: false
+
+- name: Compute drift for target group
+  vars:
+    existing_description: "{{ wallix_targetgroup_get.json.description | default('') }}"
+    session_drift: "{{ (wallix_tg_desired_session_keys | sort) != (wallix_tg_existing_session_keys | sort) }}"
+    interactive_drift: "{{ (wallix_tg_desired_interactive_keys | sort) != (wallix_tg_existing_interactive_keys | sort) }}"
+    password_drift: "{{ (wallix_tg_desired_password_keys | sort) != (wallix_tg_existing_password_keys | sort) }}"
+  ansible.builtin.set_fact:
+    wallix_tg_drift: >-
+      {{
+        (wallix_targetgroup_get.status | int == 404)
+        or (existing_description != desired_description)
+        or (session_drift | bool)
+        or (interactive_drift | bool)
+        or (password_drift | bool)
+      }}
+  changed_when: false
+
+- name: Update target group when drift detected (declarative)
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/targetgroups/{{ wallix_targetgroup.group_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      description: "{{ desired_description }}"
+      session:
+        accounts: "{{ wallix_tg_session_accounts_payload | default([]) }}"
+        interactive_logins: "{{ wallix_tg_interactive_logins_payload | default([]) }}"
+      password_retrieval:
+        accounts: "{{ wallix_tg_password_accounts_payload | default([]) }}"
+    status_code: [200, 204]
+  changed_when: wallix_tg_drift | bool
+  when: wallix_tg_drift | bool
+

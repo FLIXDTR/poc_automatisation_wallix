@@ -1,0 +1,12 @@
+---
+- name: Manage WALLIX users (PoC profiles)
+  hosts: wallix_bastion
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Ensure managed users exist (one per profile)
+      ansible.builtin.include_tasks: ../tasks/manage_users.yml

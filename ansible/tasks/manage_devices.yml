@@ -1,0 +1,15 @@
+---
+- name: Skip devices when not configured
+  ansible.builtin.debug:
+    msg: "No devices configured (set wallix_devices in assets file)."
+  changed_when: false
+  when: wallix_devices is not defined or (wallix_devices | length == 0)
+
+- name: Ensure devices exist (machines) + children resources
+  ansible.builtin.include_tasks: manage_single_device.yml
+  loop: "{{ wallix_devices | default([]) }}"
+  loop_control:
+    loop_var: wallix_device
+    label: "{{ wallix_device.device_name | default('missing_device_name') }}"
+  when: wallix_devices is defined and (wallix_devices | length > 0)
+

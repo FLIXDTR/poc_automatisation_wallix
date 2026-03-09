@@ -1,0 +1,132 @@
+---
+- name: Compute desired user group inputs
+  ansible.builtin.set_fact:
+    desired_description: "{{ wallix_usergroup.description | default('') }}"
+    desired_timeframes: "{{ wallix_usergroup.timeframes | default(['allthetime']) }}"
+    desired_users: "{{ (wallix_usergroup.users | default([])) | unique }}"
+  changed_when: false
+
+- name: Validate user group definition
+  ansible.builtin.assert:
+    that:
+      - wallix_usergroup.group_name is defined
+      - (wallix_usergroup.group_name | string | length) > 0
+      - desired_timeframes | length > 0
+    fail_msg: >-
+      User group requires group_name + at least one timeframe.
+      Got: {{ wallix_usergroup | default({}) }}
+
+- name: Fetch existing user group
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/usergroups/{{ wallix_usergroup.group_name }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  register: wallix_usergroup_get
+  changed_when: false
+
+- name: Create user group when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/usergroups"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      group_name: "{{ wallix_usergroup.group_name }}"
+      description: "{{ desired_description }}"
+      timeframes: "{{ desired_timeframes }}"
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: wallix_usergroup_get.status | int == 404
+
+- name: Update user group when drift detected
+  vars:
+    existing: "{{ wallix_usergroup_get.json | default({}) }}"
+    existing_timeframes: "{{ (existing.timeframes | default([])) | list | sort }}"
+    desired_timeframes_sorted: "{{ desired_timeframes | list | sort }}"
+    drift: >-
+      {{
+        (existing.description | default('') != desired_description)
+        or (existing_timeframes != desired_timeframes_sorted)
+      }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/usergroups/{{ wallix_usergroup.group_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      group_name: "{{ wallix_usergroup.group_name }}"
+      description: "{{ desired_description }}"
+      timeframes: "{{ desired_timeframes }}"
+    status_code: [200, 204]
+  changed_when: drift | bool
+  when:
+    - wallix_usergroup_get.status | int == 200
+    - drift | bool
+
+- name: Fetch referenced users (for membership)
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/users/{{ item }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  loop: "{{ desired_users }}"
+  loop_control:
+    label: "{{ item }}"
+  register: wallix_usergroup_member_gets
+  changed_when: false
+  when: desired_users | length > 0
+
+- name: Ensure users are members of user group (additive)
+  vars:
+    username: "{{ item.item }}"
+    user_json: "{{ item.json | default({}) }}"
+    current_groups: "{{ user_json.groups | default([]) }}"
+    desired_groups: "{{ (current_groups + [wallix_usergroup.group_name]) | unique | sort }}"
+    needs_update: "{{ wallix_usergroup.group_name not in current_groups }}"
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/users/{{ username }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      groups: "{{ desired_groups }}"
+    status_code: [200, 204]
+  loop: "{{ wallix_usergroup_member_gets.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  changed_when: needs_update | bool
+  when:
+    - desired_users | length > 0
+    - item.status | int == 200
+    - needs_update | bool
+
+- name: Warn for missing users referenced by group
+  ansible.builtin.debug:
+    msg: "User not found, cannot add to group '{{ wallix_usergroup.group_name }}': {{ item.item }}"
+  loop: "{{ wallix_usergroup_member_gets.results | default([]) }}"
+  changed_when: false
+  when:
+    - desired_users | length > 0
+    - item.status | int == 404
+

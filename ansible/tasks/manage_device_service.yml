@@ -1,0 +1,96 @@
+---
+- name: Validate service definition
+  ansible.builtin.assert:
+    that:
+      - wallix_service.service_name is defined
+      - (wallix_service.service_name | string | length) > 0
+      - wallix_service.connection_policy is defined
+      - (wallix_service.connection_policy | string | length) > 0
+      - wallix_service.protocol is defined
+      - (wallix_service.protocol | string | length) > 0
+      - wallix_service.port is defined
+    fail_msg: >-
+      Service requires service_name + connection_policy + protocol + port.
+      Got: {{ wallix_service | default({}) }}
+
+- name: Compute service desired state
+  vars:
+    existing: "{{ (wallix_services_by_name | default({})).get(wallix_service.service_name | string, {}) }}"
+    desired_port: "{{ wallix_service.port | int }}"
+    desired_protocol: "{{ wallix_service.protocol | string }}"
+    desired_policy: "{{ wallix_service.connection_policy | string }}"
+    desired_subprotocols: "{{ wallix_service.subprotocols | default([]) }}"
+    desired_global_domains: "{{ wallix_service.global_domains | default([]) }}"
+    existing_port: "{{ existing.port | default(0) | int }}"
+    existing_policy: "{{ existing.connection_policy | default('') | string }}"
+    existing_subprotocols: "{{ (existing.subprotocols | default([])) | list | sort }}"
+    existing_global_domains: "{{ (existing.global_domains | default([])) | list | sort }}"
+    desired_subprotocols_sorted: "{{ (desired_subprotocols | default([])) | list | sort }}"
+    desired_global_domains_sorted: "{{ (desired_global_domains | default([])) | list | sort }}"
+  ansible.builtin.set_fact:
+    wallix_service_existing: "{{ existing }}"
+    wallix_service_exists: "{{ existing | length > 0 }}"
+    wallix_service_desired_port: "{{ desired_port }}"
+    wallix_service_desired_protocol: "{{ desired_protocol }}"
+    wallix_service_desired_policy: "{{ desired_policy }}"
+    wallix_service_desired_subprotocols: "{{ desired_subprotocols }}"
+    wallix_service_desired_global_domains: "{{ desired_global_domains }}"
+    wallix_service_drift: >-
+      {{
+        (existing | length > 0)
+        and (
+          (existing_port != desired_port)
+          or (existing_policy != desired_policy)
+          or (existing_subprotocols != desired_subprotocols_sorted)
+          or (existing_global_domains != desired_global_domains_sorted)
+        )
+      }}
+  changed_when: false
+
+- name: Create service {{ wallix_service.service_name }} on {{ wallix_device_name }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/services"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body: >-
+      {{
+        {
+          'service_name': (wallix_service.service_name | string),
+          'connection_policy': (wallix_service_desired_policy | string),
+          'protocol': (wallix_service_desired_protocol | string),
+          'port': (wallix_service_desired_port | int),
+          'subprotocols': (wallix_service_desired_subprotocols | default([])),
+          'global_domains': (wallix_service_desired_global_domains | default([]))
+        } | to_json
+      }}
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: not wallix_service_exists | bool
+
+- name: Update service {{ wallix_service.service_name }} on {{ wallix_device_name }} when drift detected
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/services/{{ wallix_service.service_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body: >-
+      {{
+        {
+          'connection_policy': (wallix_service_desired_policy | string),
+          'port': (wallix_service_desired_port | int),
+          'subprotocols': (wallix_service_desired_subprotocols | default([])),
+          'global_domains': (wallix_service_desired_global_domains | default([]))
+        } | to_json
+      }}
+    status_code: [200, 204]
+  changed_when: true
+  when: wallix_service_drift | bool

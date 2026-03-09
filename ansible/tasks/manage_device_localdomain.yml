@@ -1,0 +1,65 @@
+---
+- name: Validate local domain definition
+  ansible.builtin.assert:
+    that:
+      - wallix_domain.domain_name is defined
+      - (wallix_domain.domain_name | string | length) > 0
+    fail_msg: "Local domain requires domain_name. Got: {{ wallix_domain | default({}) }}"
+
+- name: Fetch existing local domain {{ wallix_domain.domain_name }} on {{ wallix_device_name }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains/{{ wallix_domain.domain_name }}"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200, 404]
+  register: wallix_domain_get
+  changed_when: false
+
+- name: Create local domain {{ wallix_domain.domain_name }} when missing
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      domain_name: "{{ wallix_domain.domain_name }}"
+      description: "{{ wallix_domain.description | default('') }}"
+    status_code: [200, 201, 204]
+  changed_when: true
+  when: wallix_domain_get.status | int == 404
+
+- name: Update local domain {{ wallix_domain.domain_name }} when drift detected
+  vars:
+    existing: "{{ wallix_domain_get.json | default({}) }}"
+    desired_description: "{{ wallix_domain.description | default('') }}"
+    drift: "{{ (existing.description | default('') != desired_description) }}"
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/localdomains/{{ wallix_domain.domain_name }}"
+    method: PUT
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      description: "{{ desired_description }}"
+    status_code: [200, 204]
+  changed_when: drift | bool
+  when:
+    - wallix_domain_get.status | int == 200
+    - drift | bool
+
+- name: Ensure accounts exist in domain {{ wallix_domain.domain_name }} on {{ wallix_device_name }}
+  ansible.builtin.include_tasks: manage_device_accounts.yml
+  vars:
+    wallix_domain_name: "{{ wallix_domain.domain_name }}"
+    wallix_domain_accounts: "{{ wallix_domain.accounts | default([]) }}"

@@ -1,0 +1,275 @@
+---
+- name: Configure WALLIX Bastion baseline via API
+  hosts: wallix_bastion
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Resolve API URL from inventory when not explicitly set
+      ansible.builtin.set_fact:
+        wallix_resolved_api_url: >-
+          {{
+            wallix_api_url
+            if wallix_api_url | length > 0
+            else 'https://' ~ (hostvars[inventory_hostname].ansible_host | default(inventory_hostname))
+          }}
+
+    - name: Validate required API credentials
+      ansible.builtin.assert:
+        that:
+          - wallix_api_user | length > 0
+          - wallix_api_password | length > 0
+          - wallix_admin_new_password | length > 0
+        fail_msg: "Missing WALLIX_API_USER/WALLIX_API_PASSWORD/WALLIX_ADMIN_NEW_PASSWORD."
+
+    - name: Probe authentication on /api/users with desired password
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200, 401, 403]
+      register: wallix_probe_desired
+      failed_when: false
+      changed_when: false
+
+    - name: Detect if desired password is already active
+      ansible.builtin.set_fact:
+        wallix_desired_password_active: "{{ wallix_probe_desired.status | default(0) == 200 }}"
+
+    - name: Probe authentication on /api/users with bootstrap password
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200, 401, 403]
+      register: wallix_probe_bootstrap
+      failed_when: false
+      changed_when: false
+      when: not wallix_desired_password_active | bool
+
+    - name: Extract password-reset challenge info (when any)
+      ansible.builtin.set_fact:
+        wallix_bootstrap_authenticated: "{{ wallix_probe_bootstrap.status | default(0) == 200 }}"
+        wallix_password_reset_challenge: >-
+          {{
+            (wallix_probe_bootstrap.status | default(0) == 401)
+            and (wallix_probe_bootstrap.json is defined)
+            and (wallix_probe_bootstrap.json.auth_type | default('') == 'PASSWORD')
+          }}
+        wallix_challenge_cookie: >-
+          {{
+            (
+              wallix_probe_bootstrap.cookies_string | default('')
+              if (wallix_probe_bootstrap.cookies_string | default('') | length > 0)
+              else (wallix_probe_bootstrap.set_cookie | default('') | regex_search('^[^;]+') | default(''))
+            )
+          }}
+      when: not wallix_desired_password_active | bool
+
+    - name: Resolve management SSH settings for auth recovery (optional)
+      ansible.builtin.set_fact:
+        wallix_mgmt_ssh_host_resolved: >-
+          {{
+            wallix_mgmt_ssh_host
+            if wallix_mgmt_ssh_host | length > 0
+            else (hostvars[inventory_hostname].ansible_host | default(inventory_hostname))
+          }}
+        wallix_mgmt_ssh_super_password_resolved: >-
+          {{
+            wallix_mgmt_ssh_super_password
+            if wallix_mgmt_ssh_super_password | length > 0
+            else wallix_mgmt_ssh_password
+          }}
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_mgmt_ssh_password | default('') | length > 0
+
+    - name: Recover API access by restoring admin account via management SSH (break-glass)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/wallix_reset_admin.py"
+          - --host
+          - "{{ wallix_mgmt_ssh_host_resolved }}"
+          - --port
+          - "{{ wallix_mgmt_ssh_port }}"
+          - --user
+          - "{{ wallix_mgmt_ssh_user }}"
+          - --ssh-password
+          - "{{ wallix_mgmt_ssh_password }}"
+          - --super-password
+          - "{{ wallix_mgmt_ssh_super_password_resolved }}"
+          - --admin-password
+          - "{{ wallix_admin_new_password }}"
+      register: wallix_mgmt_reset_admin
+      no_log: true
+      changed_when: true
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_mgmt_ssh_password | default('') | length > 0
+        - not wallix_bootstrap_authenticated | default(false) | bool
+        - not wallix_password_reset_challenge | default(false) | bool
+
+    - name: Re-probe authentication on /api/users with desired password after break-glass recovery
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200, 401, 403]
+      register: wallix_probe_desired_after_recovery
+      failed_when: false
+      changed_when: false
+      when: wallix_mgmt_reset_admin is defined
+
+    - name: Update desired-password state after break-glass recovery
+      ansible.builtin.set_fact:
+        wallix_desired_password_active: "{{ wallix_probe_desired_after_recovery.status | default(0) == 200 }}"
+      when: wallix_probe_desired_after_recovery is defined
+
+    - name: Fail when break-glass recovery did not restore authentication
+      ansible.builtin.fail:
+        msg: >-
+          Break-glass recovery ran (management SSH) but API auth with WALLIX_ADMIN_NEW_PASSWORD still fails.
+          Check WALLIX_SSH_PASSWORD / WALLIX_SSH_SUPER_PASSWORD and rerun.
+      when:
+        - wallix_mgmt_reset_admin is defined
+        - not wallix_desired_password_active | bool
+
+    - name: Assert session cookie exists for password-reset challenge
+      ansible.builtin.assert:
+        that:
+          - wallix_challenge_cookie | length > 0
+        fail_msg: "Password reset challenge detected but no wab_session_id cookie was returned."
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_password_reset_challenge | bool
+
+    - name: Password reset step 1 (set new password)
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        headers:
+          Cookie: "{{ wallix_challenge_cookie }}"
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [401]
+      register: wallix_reset_step1
+      failed_when: false
+      changed_when: false
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_password_reset_challenge | bool
+
+    - name: Assert password reset step 1 expects confirmation
+      ansible.builtin.assert:
+        that:
+          - wallix_reset_step1.json is defined
+          - wallix_reset_step1.json.prompt is defined
+          - "'confirm' in (wallix_reset_step1.json.prompt | lower)"
+        fail_msg: >-
+          Unexpected password reset response when setting new password:
+          {{ wallix_reset_step1.json | default({}) }}
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_password_reset_challenge | bool
+
+    - name: Password reset step 2 (confirm new password)
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        headers:
+          Cookie: "{{ wallix_challenge_cookie }}"
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200]
+      register: wallix_reset_step2
+      failed_when: false
+      changed_when: false
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_password_reset_challenge | bool
+
+    - name: Rotate password via Users resource when already authenticated
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users/{{ wallix_api_user }}"
+        method: PUT
+        body_format: json
+        body:
+          password: "{{ wallix_admin_new_password }}"
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_api_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200, 204]
+      register: wallix_rotate_put
+      failed_when: false
+      changed_when: false
+      when:
+        - not wallix_desired_password_active | bool
+        - wallix_bootstrap_authenticated | bool
+        - not wallix_password_reset_challenge | bool
+
+    - name: Verify desired password on /api/users
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200]
+      register: wallix_verify_desired
+      failed_when: false
+      changed_when: false
+      when: not wallix_desired_password_active | bool
+
+    - name: Finalize runtime auth context
+      ansible.builtin.set_fact:
+        wallix_api_password: "{{ wallix_admin_new_password }}"
+        wallix_auth_headers: >-
+          {{
+            {'Cookie': wallix_challenge_cookie}
+            if (wallix_password_reset_challenge | default(false) | bool and wallix_challenge_cookie | length > 0)
+            else {}
+          }}
+      when:
+        - wallix_desired_password_active | bool
+          or (wallix_verify_desired.status | default(0) == 200)
+
+    - name: Assert API authentication succeeded
+      ansible.builtin.assert:
+        that:
+          - wallix_desired_password_active | bool
+            or (wallix_verify_desired.status | default(0) == 200)
+        fail_msg: >-
+          Failed to authenticate on /api/users with desired password after handling
+          password reset / rotation. Check WALLIX_API_PASSWORD and WALLIX_ADMIN_NEW_PASSWORD.
+
+    - name: Manage PoC users (one per profile)
+      ansible.builtin.include_tasks:
+        file: ../tasks/manage_users.yml
+        apply:
+          tags:
+            - users
+
+    - name: Execute baseline configuration operations
+      ansible.builtin.include_tasks: ../tasks/run_operation.yml
+      loop: "{{ wallix_configuration_operations }}"
+      loop_control:
+        loop_var: wallix_operation

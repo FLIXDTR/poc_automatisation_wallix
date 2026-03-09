@@ -1,0 +1,70 @@
+---
+- name: Bootstrap WALLIX API reachability
+  hosts: wallix_bastion
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Resolve API URL from inventory when not explicitly set
+      ansible.builtin.set_fact:
+        wallix_resolved_api_url: >-
+          {{
+            wallix_api_url
+            if wallix_api_url | length > 0
+            else 'https://' ~ (hostvars[inventory_hostname].ansible_host | default(inventory_hostname))
+          }}
+
+    - name: Wait for Bastion HTTPS endpoint
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/"
+        method: GET
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code:
+          - 200
+          - 301
+          - 302
+          - 401
+          - 403
+      register: wallix_https_check
+      retries: 30
+      delay: 10
+      until: wallix_https_check.status in [200, 301, 302, 401, 403]
+      changed_when: false
+
+    - name: Probe health/status endpoints
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}{{ item }}"
+        method: GET
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code:
+          - 200
+          - 401
+          - 403
+      loop: "{{ wallix_health_endpoints }}"
+      register: wallix_health_attempts
+      failed_when: false
+      changed_when: false
+
+    - name: Select first reachable health endpoint
+      ansible.builtin.set_fact:
+        wallix_health_endpoint_selected: >-
+          {{
+            (
+              wallix_health_attempts.results
+              | selectattr('status', 'defined')
+              | selectattr('status', 'in', [200, 401, 403])
+              | map(attribute='item')
+              | list
+              | first
+            )
+            | default('not_found')
+          }}
+
+    - name: Print bootstrap summary
+      ansible.builtin.debug:
+        msg:
+          - "WALLIX API URL: {{ wallix_resolved_api_url }}"
+          - "Health endpoint selected: {{ wallix_health_endpoint_selected }}"

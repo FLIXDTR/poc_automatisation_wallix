@@ -1,0 +1,15 @@
+---
+- name: Skip user groups when not configured
+  ansible.builtin.debug:
+    msg: "No user groups configured (set wallix_usergroups in assets file)."
+  changed_when: false
+  when: wallix_usergroups is not defined or (wallix_usergroups | length == 0)
+
+- name: Ensure user groups exist and membership is applied
+  ansible.builtin.include_tasks: manage_usergroup.yml
+  loop: "{{ wallix_usergroups | default([]) }}"
+  loop_control:
+    loop_var: wallix_usergroup
+    label: "{{ wallix_usergroup.group_name | default('missing_group_name') }}"
+  when: wallix_usergroups is defined and (wallix_usergroups | length > 0)
+

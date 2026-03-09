@@ -1,0 +1,106 @@
+---
+# WALLIX assets configuration (devices, user groups, target groups, authorizations)
+#
+# This file is meant to be versioned (no secrets in clear).
+# Put secrets in your local env file and reference them via *_env keys.
+#
+# You can override the path with:
+#   WALLIX_ASSETS_FILE=/path/to/your.yml
+
+# --------------------------------------------------------------------
+# Devices ("machines") + services + local accounts (optional)
+# --------------------------------------------------------------------
+wallix_devices:
+  - device_name: winserver_dc
+    description: "PoC Windows Server"
+    # Set WIN_DC_HOST in your secrets file to override.
+    host: "{{ lookup('env', 'WIN_DC_HOST') | default('192.168.214.134', true) }}"
+    services:
+      - service_name: rdp
+        connection_policy: RDP
+        protocol: RDP
+        port: 3389
+    local_domains:
+      - domain_name: local
+        accounts:
+          - account_name: Administrator
+            account_login: Administrator
+            checkout_policy: default
+            credentials:
+              - type: password
+                password_env: WIN_DC_ADMIN_PASSWORD
+                required: false
+
+  - device_name: runner_vm
+    description: "PoC runner (SSH) - temporary target"
+    host: "192.168.214.132"
+    services:
+      - service_name: ssh
+        connection_policy: SSH
+        protocol: SSH
+        port: 22
+        subprotocols:
+          - SSH_SHELL_SESSION
+
+# --------------------------------------------------------------------
+# User groups (used by authorizations)
+# Note: membership is applied by updating users' `groups` field.
+# --------------------------------------------------------------------
+wallix_usergroups:
+  - group_name: poc_admins
+    description: "PoC admins"
+    timeframes:
+      - allthetime
+    users:
+      - admin
+      - poc_product_admin
+      - poc_system_admin
+
+# --------------------------------------------------------------------
+# Target groups (what users can access)
+# For session accounts, `service` must match a service_name on the device.
+# --------------------------------------------------------------------
+wallix_targetgroups:
+  - group_name: poc_windows
+    description: "PoC Windows targets"
+    session_accounts:
+      - account: Administrator
+        domain: local
+        domain_type: local
+        device: winserver_dc
+        service: rdp
+        application: null
+    password_retrieval_accounts: []
+
+  - group_name: poc_runner
+    description: "PoC runner targets (temporary)"
+    session_interactive_logins:
+      - device: runner_vm
+        service: ssh
+        application: null
+    password_retrieval_accounts: []
+
+# --------------------------------------------------------------------
+# Authorizations (permissions / privileges)
+# Link a user group to a target group + allowed subprotocols.
+# --------------------------------------------------------------------
+wallix_authorizations:
+  - authorization_name: poc_rdp_winserver
+    user_group: poc_admins
+    target_group: poc_windows
+    subprotocols:
+      - RDP
+    authorize_sessions: true
+    authorize_password_retrieval: false
+    approval_required: false
+    is_recorded: false
+
+  - authorization_name: poc_ssh_runner
+    user_group: poc_admins
+    target_group: poc_runner
+    subprotocols:
+      - SSH_SHELL_SESSION
+    authorize_sessions: true
+    authorize_password_retrieval: false
+    approval_required: false
+    is_recorded: false

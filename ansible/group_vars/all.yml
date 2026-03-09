@@ -1,0 +1,105 @@
+---
+wallix_validate_certs: "{{ lookup('env', 'WALLIX_VALIDATE_CERTS') | default('false', true) | bool }}"
+wallix_api_url: "{{ lookup('env', 'WALLIX_API_URL') | default('', true) }}"
+wallix_api_user: "{{ lookup('env', 'WALLIX_API_USER') | default('admin', true) }}"
+wallix_api_password: "{{ lookup('env', 'WALLIX_API_PASSWORD') | default('', true) }}"
+wallix_admin_new_password: "{{ lookup('env', 'WALLIX_ADMIN_NEW_PASSWORD') | default('', true) }}"
+
+# Optional management SSH access (used as a recovery path when API credentials are unknown)
+wallix_mgmt_ssh_host: "{{ lookup('env', 'WALLIX_SSH_HOST') | default('', true) }}"
+wallix_mgmt_ssh_port: "{{ lookup('env', 'WALLIX_SSH_PORT') | default('2242', true) }}"
+wallix_mgmt_ssh_user: "{{ lookup('env', 'WALLIX_SSH_USER') | default('wabadmin', true) }}"
+wallix_mgmt_ssh_password: "{{ lookup('env', 'WALLIX_SSH_PASSWORD') | default('', true) }}"
+wallix_mgmt_ssh_super_password: "{{ lookup('env', 'WALLIX_SSH_SUPER_PASSWORD') | default('', true) }}"
+
+timezone: "UTC"
+ntp_servers: []
+dns_servers: []
+backup_target: ""
+
+wallix_health_endpoints:
+  - /api/status
+  - /api/v1/status
+  - /status
+
+wallix_auth_endpoints:
+  - /api/auth/login
+  - /api/v1/auth/login
+  - /api/login
+wallix_auth_payload:
+  username: "{{ wallix_api_user }}"
+  password: "{{ wallix_api_password }}"
+
+wallix_auth_header_name: "Authorization"
+wallix_auth_header_prefix: "Bearer "
+wallix_use_basic_auth_fallback: true
+wallix_default_success_codes:
+  - 200
+  - 201
+  - 204
+
+wallix_configuration_operations:
+  - name: "Configure timezone + DNS + NTP"
+    required: false
+    method: "PATCH"
+    candidate_paths:
+      - /api/v1/system/settings
+      - /api/system/settings
+      - /rest/system/settings
+    body:
+      timezone: "{{ timezone }}"
+      dns_servers: "{{ dns_servers }}"
+      ntp_servers: "{{ ntp_servers }}"
+    expected_status:
+      - 200
+      - 204
+
+  - name: "Configure backup target (optional)"
+    enabled: "{{ backup_target | length > 0 }}"
+    required: false
+    method: "PATCH"
+    candidate_paths:
+      - /api/v1/backup/settings
+      - /api/backup/settings
+    body:
+      target: "{{ backup_target }}"
+    expected_status:
+      - 200
+      - 204
+
+# -----------------------------------------------------------------------------
+# Optional: manage PoC users (one per profile)
+#
+# Enable with:
+#   WALLIX_MANAGED_USERS_ENABLED=true
+#
+# Password handling:
+# - If WALLIX_MANAGED_USERS_PASSWORD is set, it is used.
+# - Otherwise, we reuse WALLIX_ADMIN_NEW_PASSWORD (PoC convenience).
+#
+# Profiles (as exposed in WALLIX UI/API):
+#   approver, auditor, operation_administrator, product_administrator,
+#   system_administrator, user
+# -----------------------------------------------------------------------------
+wallix_managed_users_enabled: "{{ lookup('env', 'WALLIX_MANAGED_USERS_ENABLED') | default('false', true) | bool }}"
+wallix_managed_users_password: "{{ lookup('env', 'WALLIX_MANAGED_USERS_PASSWORD') | default('', true) }}"
+
+wallix_managed_users:
+  - user_name: "poc_approver"
+    display_name: "PoC Approver"
+    profile: "approver"
+  - user_name: "poc_auditor"
+    display_name: "PoC Auditor"
+    profile: "auditor"
+  - user_name: "poc_operation_admin"
+    display_name: "PoC Operation Administrator"
+    profile: "operation_administrator"
+  - user_name: "poc_product_admin"
+    display_name: "PoC Product Administrator"
+    profile: "product_administrator"
+  - user_name: "poc_system_admin"
+    display_name: "PoC System Administrator"
+    profile: "system_administrator"
+  - user_name: "poc_user"
+    display_name: "PoC User"
+    profile: "user"

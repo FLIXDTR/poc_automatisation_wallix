@@ -1,0 +1,140 @@
+---
+- name: Resolve API URL from inventory when not explicitly set
+  ansible.builtin.set_fact:
+    wallix_resolved_api_url: >-
+      {{
+        wallix_api_url
+        if wallix_api_url | length > 0
+        else 'https://' ~ (hostvars[inventory_hostname].ansible_host | default(inventory_hostname))
+      }}
+  when: wallix_resolved_api_url is not defined or (wallix_resolved_api_url | length == 0)
+
+- name: Skip managed users when disabled
+  ansible.builtin.debug:
+    msg: "Managed users disabled (set WALLIX_MANAGED_USERS_ENABLED=true to enable)."
+  when: not wallix_managed_users_enabled | bool
+
+- name: Resolve effective password for managed users
+  ansible.builtin.set_fact:
+    wallix_managed_users_effective_password: >-
+      {{
+        wallix_managed_users_password
+        if (wallix_managed_users_password | default('') | length > 0)
+        else wallix_admin_new_password
+      }}
+  when: wallix_managed_users_enabled | bool
+
+- name: Validate managed users configuration
+  ansible.builtin.assert:
+    that:
+      - wallix_managed_users is defined
+      - wallix_managed_users | length > 0
+      - wallix_managed_users_effective_password | length > 0
+    fail_msg: >-
+      Managed users are enabled but configuration is incomplete.
+      Provide WALLIX_MANAGED_USERS_PASSWORD or WALLIX_ADMIN_NEW_PASSWORD and define wallix_managed_users.
+  when: wallix_managed_users_enabled | bool
+
+- name: Fetch existing users (for idempotence)
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/users?limit=1000"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user }}"
+    url_password: "{{ wallix_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200]
+  register: wallix_users_list
+  changed_when: false
+  when: wallix_managed_users_enabled | bool
+
+- name: Build list of existing usernames
+  ansible.builtin.set_fact:
+    wallix_existing_usernames: >-
+      {{
+        (wallix_users_list.json | default([]))
+        | map(attribute='user_name')
+        | list
+      }}
+  when: wallix_managed_users_enabled | bool
+
+- name: Ensure managed users exist (one per profile)
+  vars:
+    wallix_user: "{{ item }}"
+    wallix_user_exists: "{{ wallix_user.user_name in wallix_existing_usernames }}"
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/users"
+    method: POST
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user }}"
+    url_password: "{{ wallix_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    body_format: json
+    body:
+      user_name: "{{ wallix_user.user_name }}"
+      display_name: "{{ wallix_user.display_name | default(wallix_user.user_name) }}"
+      email: "{{ wallix_user.email | default(wallix_user.user_name ~ '@example.invalid') }}"
+      preferred_language: "{{ wallix_user.preferred_language | default('fr') }}"
+      profile: "{{ wallix_user.profile }}"
+      groups: "{{ wallix_user.groups | default([]) }}"
+      password: "{{ wallix_user.password | default(wallix_managed_users_effective_password) }}"
+      force_change_pwd: "{{ wallix_user.force_change_pwd | default(false) | bool }}"
+      user_auths: "{{ wallix_user.user_auths | default(['local_password']) }}"
+    status_code: [204, 200, 201]
+  loop: "{{ wallix_managed_users }}"
+  loop_control:
+    label: "{{ wallix_user.user_name }} (profile={{ wallix_user.profile }})"
+  no_log: true
+  register: wallix_user_create_results
+  changed_when: not wallix_user_exists | bool
+  when:
+    - wallix_managed_users_enabled | bool
+    - not wallix_user_exists | bool
+
+- name: Warn for managed users already present (profiles are not modified by this PoC)
+  vars:
+    wallix_user: "{{ item }}"
+  ansible.builtin.debug:
+    msg: >-
+      User already exists: {{ wallix_user.user_name }} (expected profile={{ wallix_user.profile }}).
+      This PoC does not change profile for existing users.
+  loop: "{{ wallix_managed_users }}"
+  loop_control:
+    label: "{{ wallix_user.user_name }}"
+  changed_when: false
+  when:
+    - wallix_managed_users_enabled | bool
+    - wallix_user.user_name in wallix_existing_usernames
+
+- name: Re-fetch users after managed users changes
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/users?limit=1000"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user }}"
+    url_password: "{{ wallix_api_password }}"
+    force_basic_auth: true
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200]
+  register: wallix_users_list_after
+  changed_when: false
+  when: wallix_managed_users_enabled | bool
+
+- name: Assert managed users now exist
+  vars:
+    wallix_after_usernames: >-
+      {{
+        (wallix_users_list_after.json | default([]))
+        | map(attribute='user_name')
+        | list
+      }}
+  ansible.builtin.assert:
+    that:
+      - item.user_name in wallix_after_usernames
+    fail_msg: "Managed user was not found after apply: {{ item.user_name }}"
+  loop: "{{ wallix_managed_users }}"
+  loop_control:
+    label: "{{ item.user_name }}"
+  when: wallix_managed_users_enabled | bool

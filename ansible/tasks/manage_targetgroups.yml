@@ -1,0 +1,15 @@
+---
+- name: Skip target groups when not configured
+  ansible.builtin.debug:
+    msg: "No target groups configured (set wallix_targetgroups in assets file)."
+  changed_when: false
+  when: wallix_targetgroups is not defined or (wallix_targetgroups | length == 0)
+
+- name: Ensure target groups exist and targets are declared
+  ansible.builtin.include_tasks: manage_targetgroup.yml
+  loop: "{{ wallix_targetgroups | default([]) }}"
+  loop_control:
+    loop_var: wallix_targetgroup
+    label: "{{ wallix_targetgroup.group_name | default('missing_group_name') }}"
+  when: wallix_targetgroups is defined and (wallix_targetgroups | length > 0)
+

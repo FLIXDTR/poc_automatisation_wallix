@@ -1,0 +1,64 @@
+---
+- name: Apply WALLIX assets (devices, groups, authorizations) via API
+  hosts: wallix_bastion
+  gather_facts: false
+  connection: local
+
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Resolve API URL from inventory when not explicitly set
+      ansible.builtin.set_fact:
+        wallix_resolved_api_url: >-
+          {{
+            wallix_api_url
+            if wallix_api_url | length > 0
+            else 'https://' ~ (hostvars[inventory_hostname].ansible_host | default(inventory_hostname))
+          }}
+
+    - name: Load assets configuration
+      ansible.builtin.include_vars:
+        file: "{{ lookup('env', 'WALLIX_ASSETS_FILE') | default(playbook_dir ~ '/../data/wallix_assets.yml', true) }}"
+
+    - name: Probe authentication on /api/users with desired admin password (optional)
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}/api/users"
+        method: GET
+        url_username: "{{ wallix_api_user }}"
+        url_password: "{{ wallix_admin_new_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: [200, 401, 403]
+      register: wallix_assets_probe_desired
+      failed_when: false
+      changed_when: false
+      when: wallix_admin_new_password | default('') | length > 0
+
+    - name: Prefer WALLIX_ADMIN_NEW_PASSWORD when it authenticates
+      ansible.builtin.set_fact:
+        wallix_api_password: "{{ wallix_admin_new_password }}"
+      when: wallix_assets_probe_desired.status | default(0) == 200
+
+    - name: Validate required API credentials
+      ansible.builtin.assert:
+        that:
+          - wallix_api_user | length > 0
+          - wallix_api_password | length > 0
+        fail_msg: "Missing WALLIX_API_USER/WALLIX_API_PASSWORD."
+
+    - name: Apply devices (machines) + services + local accounts
+      ansible.builtin.include_tasks: ../tasks/manage_devices.yml
+      tags: [devices]
+
+    - name: Apply user groups + membership
+      ansible.builtin.include_tasks: ../tasks/manage_usergroups.yml
+      tags: [usergroups]
+
+    - name: Apply target groups
+      ansible.builtin.include_tasks: ../tasks/manage_targetgroups.yml
+      tags: [targetgroups]
+
+    - name: Apply authorizations
+      ansible.builtin.include_tasks: ../tasks/manage_authorizations.yml
+      tags: [authorizations]

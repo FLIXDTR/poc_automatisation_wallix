@@ -1,0 +1,23 @@
+vsphere_server   = "vcenter.example.local"
+vsphere_user     = "administrator@vsphere.local"
+vsphere_password = "CHANGE_ME"
+
+datacenter    = "Datacenter"
+cluster       = "Cluster"
+datastore     = "Datastore"
+network       = "VM Network"
+resource_pool = "Resources"
+
+template_name = "wallix-bastion-base-v1"
+vm_name       = "wallix-bastion-poc"
+vm_cpu        = 4
+vm_memory_mb  = 8192
+vm_disk_gb    = 120
+vm_folder     = ""
+
+enable_guest_customization = false
+bastion_ip                 = ""
+bastion_netmask            = 24
+bastion_gateway            = ""
+dns_servers                = []
+bastion_domain             = "localdomain"

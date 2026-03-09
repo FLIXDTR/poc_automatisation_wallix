@@ -1,0 +1,74 @@
+---
+- name: Skip disabled operation
+  ansible.builtin.debug:
+    msg: "Skipping disabled operation: {{ wallix_operation.name }}"
+  when: not (wallix_operation.enabled | default(true) | bool)
+
+- name: Run operation endpoints
+  when: wallix_operation.enabled | default(true) | bool
+  block:
+    - name: Try candidate endpoints for {{ wallix_operation.name }}
+      ansible.builtin.uri:
+        url: "{{ wallix_resolved_api_url }}{{ item }}"
+        method: "{{ wallix_operation.method | default('PATCH') }}"
+        body_format: json
+        body: "{{ wallix_operation.body | default({}) | to_json | from_json }}"
+        headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+        url_username: >-
+          {{
+            wallix_api_user
+            if (wallix_auth_headers | default({}) | length == 0 and wallix_use_basic_auth_fallback | bool)
+            else omit
+          }}
+        url_password: >-
+          {{
+            wallix_api_password
+            if (wallix_auth_headers | default({}) | length == 0 and wallix_use_basic_auth_fallback | bool)
+            else omit
+          }}
+        force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0 and wallix_use_basic_auth_fallback | bool) | bool }}"
+        validate_certs: "{{ wallix_validate_certs | bool }}"
+        status_code: "{{ wallix_operation.expected_status | default(wallix_default_success_codes) | to_json | from_json }}"
+      loop: "{{ wallix_operation.candidate_paths }}"
+      register: wallix_operation_attempts
+      failed_when: false
+      changed_when: false
+
+    - name: Select first successful endpoint for {{ wallix_operation.name }}
+      ansible.builtin.set_fact:
+        wallix_operation_success: >-
+          {{
+            (
+              wallix_operation_attempts.results
+              | selectattr('status', 'defined')
+              | selectattr('status', 'in', wallix_operation.expected_status | default(wallix_default_success_codes))
+              | list
+              | first
+            )
+            | default({})
+          }}
+
+    - name: Fail when required operation did not succeed
+      ansible.builtin.fail:
+        msg: >-
+          No endpoint succeeded for required operation "{{ wallix_operation.name }}".
+          Tried: {{ wallix_operation.candidate_paths | join(', ') }}
+      when:
+        - wallix_operation.required | default(true) | bool
+        - wallix_operation_success | length == 0
+
+    - name: Report optional operation skipped (no compatible endpoint)
+      ansible.builtin.debug:
+        msg: >-
+          Optional operation "{{ wallix_operation.name }}" skipped (no compatible endpoint).
+          Tried: {{ wallix_operation.candidate_paths | join(', ') }}
+      when:
+        - not (wallix_operation.required | default(true) | bool)
+        - wallix_operation_success | length == 0
+
+    - name: Report operation result
+      ansible.builtin.debug:
+        msg: >-
+          Operation "{{ wallix_operation.name }}" applied via endpoint
+          {{ wallix_operation_success.item | default('none') }}.
+      when: wallix_operation_success | length > 0

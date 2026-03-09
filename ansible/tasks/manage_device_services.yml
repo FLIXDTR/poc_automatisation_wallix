@@ -1,0 +1,39 @@
+---
+- name: Skip services when none configured for {{ wallix_device_name }}
+  ansible.builtin.debug:
+    msg: "No services configured for device {{ wallix_device_name }}."
+  changed_when: false
+  when: wallix_device_services is not defined or (wallix_device_services | length == 0)
+
+- name: Fetch existing services for {{ wallix_device_name }}
+  ansible.builtin.uri:
+    url: "{{ wallix_resolved_api_url }}/api/devices/{{ wallix_device_name }}/services?limit=1000"
+    method: GET
+    headers: "{{ wallix_auth_headers | default({}) | to_json | from_json }}"
+    url_username: "{{ wallix_api_user if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    url_password: "{{ wallix_api_password if (wallix_auth_headers | default({}) | length == 0) else omit }}"
+    force_basic_auth: "{{ (wallix_auth_headers | default({}) | length == 0) | bool }}"
+    validate_certs: "{{ wallix_validate_certs | bool }}"
+    status_code: [200]
+  register: wallix_services_list
+  changed_when: false
+  when: wallix_device_services is defined and (wallix_device_services | length > 0)
+
+- name: Build service map for {{ wallix_device_name }}
+  ansible.builtin.set_fact:
+    wallix_services_by_name: >-
+      {{
+        dict(
+          (wallix_services_list.json | default([]) | map(attribute='service_name') | list)
+          | zip(wallix_services_list.json | default([]))
+        )
+      }}
+  when: wallix_services_list is defined
+
+- name: Ensure services exist for {{ wallix_device_name }}
+  ansible.builtin.include_tasks: manage_device_service.yml
+  loop: "{{ wallix_device_services | default([]) }}"
+  loop_control:
+    loop_var: wallix_service
+    label: "{{ wallix_service.service_name | default('missing_service_name') }}"
+  when: wallix_device_services is defined and (wallix_device_services | length > 0)
